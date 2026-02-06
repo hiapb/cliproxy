@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 set -u
 
+# ==============================================================================
+# 全局配置
+# ==============================================================================
 APP_DIR="${HOME}/cliproxyapi"
 IMAGE="router-for-me/cliproxyapi:latest"
 CONFIG_URL="https://raw.githubusercontent.com/router-for-me/CLIProxyAPI/main/config.example.yaml"
 DEFAULT_PORT="8317"
 CONTAINER_NAME="cliproxyapi"
 
+# ==============================================================================
+# UI 颜色库
+# ==============================================================================
 RED='\033[31m'
 GREEN='\033[32m'
 YELLOW='\033[33m'
@@ -21,38 +27,128 @@ icon_info="ℹ️"
 icon_warn="⚠️"
 icon_rocket="🚀"
 icon_docker="🐳"
+icon_fix="🔧"
 
 log_info() { echo -e "${BLUE}${icon_info} [INFO] ${PLAIN}$1"; }
 log_success() { echo -e "${GREEN}${icon_success} [SUCCESS] ${PLAIN}$1"; }
 log_error() { echo -e "${RED}${icon_error} [ERROR] ${PLAIN}$1"; }
 log_warn() { echo -e "${YELLOW}${icon_warn} [WARN] ${PLAIN}$1"; }
+log_fix() { echo -e "${CYAN}${icon_fix} [AUTO-FIX] ${PLAIN}$1"; }
 log_header() { echo -e "\n${BOLD}${CYAN}=== $1 ===${PLAIN}"; }
 
-need_cmd() {
-    command -v "$1" >/dev/null 2>&1 || { log_error "缺少必要命令：$1"; exit 1; }
-}
+# ==============================================================================
+# 智能依赖安装系统 (核心修改)
+# ==============================================================================
 
-check_docker() {
-    if ! command -v docker >/dev/null 2>&1; then echo "not_installed"; return; fi
-    if ! docker compose version >/dev/null 2>&1; then echo "no_compose"; return; fi
-    echo "ok"
-}
-
-ensure_env() {
-    need_cmd curl
-    need_cmd sed  # 核心依赖变更为 sed
-    need_cmd grep
-    
-    local d_status=$(check_docker)
-    if [[ "$d_status" == "not_installed" ]]; then
-        log_error "未检测到 Docker，请先安装。"
-        exit 1
-    elif [[ "$d_status" == "no_compose" ]]; then
-        log_error "未检测到 Docker Compose 插件。"
+# 1. 检查是不是 root，安装软件需要 root
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        log_error "安装依赖需要 root 权限，请使用 'sudo -i' 切换到 root 用户后再运行脚本。"
         exit 1
     fi
 }
 
+# 2. 识别包管理器
+get_pm() {
+    if command -v apt-get >/dev/null 2>&1; then
+        echo "apt"
+    elif command -v yum >/dev/null 2>&1; then
+        echo "yum"
+    elif command -v dnf >/dev/null 2>&1; then
+        echo "dnf"
+    elif command -v apk >/dev/null 2>&1; then
+        echo "apk"
+    else
+        echo "unknown"
+    fi
+}
+
+# 3. 通用软件安装函数 (curl, grep, sed 等)
+# 用法: check_install "命令名" "包名(如果不同)"
+check_install() {
+    local cmd="$1"
+    local pkg="${2:-$1}" # 如果没传包名，默认包名=命令名
+
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        log_fix "未找到命令 '$cmd'，正在自动安装 '$pkg'..."
+        local pm=$(get_pm)
+        
+        case "$pm" in
+            apt)
+                apt-get update -y >/dev/null 2>&1
+                apt-get install -y "$pkg" >/dev/null 2>&1
+                ;;
+            yum|dnf)
+                $pm install -y "$pkg" >/dev/null 2>&1
+                ;;
+            apk)
+                apk add "$pkg" >/dev/null 2>&1
+                ;;
+            *)
+                log_error "无法识别系统包管理器，请手动安装: $pkg"
+                exit 1
+                ;;
+        esac
+
+        # 安装完再查一次
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            log_error "$pkg 安装失败，请检查网络或源设置。"
+            exit 1
+        else
+            log_success "$pkg 安装完成。"
+        fi
+    fi
+}
+
+# 4. Docker 专用安装逻辑
+ensure_docker() {
+    # 检查 Docker
+    if ! command -v docker >/dev/null 2>&1; then
+        log_fix "未检测到 Docker，正在执行官方一键安装脚本..."
+        curl -fsSL https://get.docker.com | bash
+        systemctl enable docker >/dev/null 2>&1
+        systemctl start docker >/dev/null 2>&1
+    fi
+
+    # 检查 Docker Compose
+    if ! docker compose version >/dev/null 2>&1; then
+        log_fix "Docker 已安装但缺少 Compose 插件，尝试修复..."
+        local pm=$(get_pm)
+        if [[ "$pm" == "apt" ]]; then
+            apt-get update && apt-get install -y docker-compose-plugin
+        elif [[ "$pm" == "yum" || "$pm" == "dnf" ]]; then
+            $pm install -y docker-compose-plugin
+        else
+            log_error "请手动安装 docker-compose-plugin"
+            exit 1
+        fi
+    fi
+
+    # 确保 Docker 守护进程在运行
+    if ! docker ps >/dev/null 2>&1; then
+        log_warn "Docker 未运行，正在尝试启动..."
+        systemctl start docker
+        sleep 2
+    fi
+    
+    log_success "Docker 环境就绪。"
+}
+
+ensure_env() {
+    check_root
+    
+    # 基础工具检查与安装
+    check_install curl
+    check_install grep
+    check_install sed
+    
+    # Docker 检查与安装
+    ensure_docker
+}
+
+# ==============================================================================
+# 交互输入
+# ==============================================================================
 prompt_default() {
     local prompt="$1" def="$2" val
     echo -e -n "${CYAN}${prompt} ${PLAIN}(默认: ${GREEN}${def}${PLAIN}): "
@@ -86,6 +182,9 @@ prompt_yn_default_yes() {
 is_number() { [[ "${1:-}" =~ ^[0-9]+$ ]]; }
 ensure_dir() { mkdir -p "$APP_DIR"/{logs,auths}; }
 
+# ==============================================================================
+# 核心逻辑 (业务)
+# ==============================================================================
 write_compose() {
     local host_port="$1"
     local bind_local="$2"
@@ -115,9 +214,7 @@ EOF
 inject_required_config() {
     local secret="$1"
     local conf="${APP_DIR}/config.yaml"
-
     local safe_secret=$(echo "$secret" | sed 's/#/\\#/g')
-
 
     if grep -q "port:" "$conf"; then
         sed -i 's/^[[:space:]]*port: [0-9]*/  port: 8317/' "$conf"
@@ -141,7 +238,9 @@ inject_required_config() {
 }
 
 install_app() {
-    ensure_env
+    log_header "环境自检与准备"
+    ensure_env  # 这里会自动安装 Docker 和 curl
+
     log_header "安装 CLIProxyAPI"
     
     local port secret local_only
@@ -187,7 +286,10 @@ install_app() {
 }
 
 update_app() {
-    ensure_env
+    # 更新也需要环境正常
+    log_header "检查环境"
+    ensure_env 
+    
     log_header "更新 CLIProxyAPI"
     if [[ ! -d "$APP_DIR" ]]; then log_error "未安装"; return; fi
     cd "$APP_DIR" || return
@@ -197,11 +299,13 @@ update_app() {
 }
 
 uninstall_app() {
-    ensure_env
     log_header "卸载 CLIProxyAPI"
     if [[ -d "$APP_DIR" ]]; then
         cd "$APP_DIR" || return
-        docker compose down --remove-orphans || true
+        # 即使没有 docker 命令，也要尝试删目录
+        if command -v docker >/dev/null 2>&1; then
+             docker compose down --remove-orphans || true
+        fi
     fi
     local ans="$(prompt_yn_default_yes "删除所有数据（含配置）？")"
     if [[ "$ans" == "y" ]]; then rm -rf "$APP_DIR"; log_success "已清理"; else log_info "保留数据"; fi
@@ -225,9 +329,10 @@ get_status() {
 show_menu() {
     clear
     echo -e "================================================================"
-    echo -e "           ${BOLD}${CYAN}CLIProxyAPI${PLAIN} 管理脚本          "
+    echo -e "   ${BOLD}${CYAN}CLIProxyAPI${PLAIN} 管理脚本 (自动装机版)"
     echo -e "================================================================"
-    echo -e " 1. 安装"
+    echo -e " 状态: $(get_status)"
+    echo -e " 1. 安装 / 重置 (自动补全环境)"
     echo -e " 2. 更新"
     echo -e " 3. 卸载"
     echo -e " 0. 退出"
