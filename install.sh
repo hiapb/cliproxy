@@ -93,7 +93,6 @@ def replace_or_prepend_block(s: str, key: str, block: str) -> str:
         s = block + "\n" + s
     return s
 
-# 容器内固定 8317，外部端口由 docker 映射决定
 s = replace_or_prepend_block(s, "server", "server:\n  port: 8317\n")
 
 if not re.search(r'(?m)^auth-dir:\s*', s):
@@ -118,8 +117,8 @@ install_app() {
     exit 1
   fi
 
-  local_only="$(prompt_yn_default_yes "是否仅本机访问（绑定 127.0.0.1）")"
-  secret="$(prompt_required "请输入后台管理密码（secret-key，用于 /management.html）")"
+  local_only="$(prompt_yn_default_yes "是否仅本机访问")"
+  secret="$(prompt_required "请输入后台管理密码")"
 
   ensure_dir
 
