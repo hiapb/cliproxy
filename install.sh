@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-
 APP_DIR="${HOME}/cliproxyapi"
 IMAGE="router-for-me/cliproxyapi:latest"
 CONFIG_URL="https://raw.githubusercontent.com/router-for-me/CLIProxyAPI/main/config.example.yaml"
@@ -34,19 +33,43 @@ prompt_required() {
   done
 }
 
+prompt_yn_default_yes() {
+  # 默认 Yes：回车=Y
+  local prompt="$1" val
+  read -r -p "${prompt}（Y/n，回车默认 Y）：" val
+  if [[ -z "${val}" ]]; then
+    echo "y"
+    return 0
+  fi
+  case "$val" in
+    y|Y|yes|YES) echo "y" ;;
+    n|N|no|NO)   echo "n" ;;
+    *) echo "y" ;; # 输入乱七八糟也当默认
+  esac
+}
+
 is_number() { [[ "${1:-}" =~ ^[0-9]+$ ]]; }
 
 ensure_dir() { mkdir -p "$APP_DIR"/{logs,auths}; }
 
 write_compose() {
   local host_port="$1"
+  local bind_local="$2" # y/n
+  local ports_line
+
+  if [[ "$bind_local" == "y" ]]; then
+    ports_line="      - \"127.0.0.1:${host_port}:8317\""
+  else
+    ports_line="      - \"${host_port}:8317\""
+  fi
+
   cat > "${APP_DIR}/docker-compose.yml" <<EOF
 services:
   cliproxyapi:
     image: ${IMAGE}
     container_name: cliproxyapi
     ports:
-      - "127.0.0.1:${host_port}:8317"
+${ports_line}
     volumes:
       - ./config.yaml:/CLIProxyAPI/config.yaml
       - ./auths:/root/.cli-proxy-api
@@ -70,13 +93,14 @@ def replace_or_prepend_block(s: str, key: str, block: str) -> str:
         s = block + "\n" + s
     return s
 
-s = replace_or_prepend_block(s, "server", "server:\\n  port: 8317\\n")
+# 容器内固定 8317，外部端口由 docker 映射决定
+s = replace_or_prepend_block(s, "server", "server:\n  port: 8317\n")
 
 if not re.search(r'(?m)^auth-dir:\s*', s):
-    s = "auth-dir: /root/.cli-proxy-api\\n" + s
+    s = "auth-dir: /root/.cli-proxy-api\n" + s
 
 secret = ${secret!r}
-rm_block = f'remote-management:\\n  allow-remote: false\\n  secret-key: "{secret}"\\n'
+rm_block = f'remote-management:\n  allow-remote: false\n  secret-key: "{secret}"\n'
 s = replace_or_prepend_block(s, "remote-management", rm_block)
 
 p.write_text(s, encoding="utf-8")
@@ -86,28 +110,30 @@ PY
 install_app() {
   need_docker
   echo "=== 安装 CLIProxyAPI（Docker）==="
-  local port secret
+  local port secret local_only
 
-  port="$(prompt_default "请输入要监听的端口（仅本机访问）" "$DEFAULT_PORT")"
+  port="$(prompt_default "请输入要监听的端口" "$DEFAULT_PORT")"
   if ! is_number "$port" || (( port < 1 || port > 65535 )); then
     echo "端口不合法：$port"
     exit 1
   fi
-  secret="$(prompt_required "请输入后台管理密码"
+
+  local_only="$(prompt_yn_default_yes "是否仅本机访问（绑定 127.0.0.1）")"
+  secret="$(prompt_required "请输入后台管理密码（secret-key，用于 /management.html）")"
 
   ensure_dir
 
-  echo "[1/5] 写入 docker-compose.yml（127.0.0.1:${port} -> 容器 8317）"
-  write_compose "$port"
+  echo "[1/5] 写入 docker-compose.yml"
+  write_compose "$port" "$local_only"
 
   if [[ ! -f "${APP_DIR}/config.yaml" ]]; then
     echo "[2/5] 下载示例配置 -> config.yaml（首次安装）"
     curl -fsSL "$CONFIG_URL" -o "${APP_DIR}/config.yaml"
   else
-    echo "[2/5] 已存在 config.yaml，跳过下载"
+    echo "[2/5] 已存在 config.yaml，跳过下载（保留你的配置）"
   fi
 
-  echo "[3/5] 注入必要配置"
+  echo "[3/5] 注入必要配置（只动 server/auth-dir/remote-management）"
   inject_required_config "$secret"
 
   echo "[4/5] 拉取镜像并启动"
@@ -117,7 +143,11 @@ install_app() {
 
   echo "[5/5] 完成"
   echo "目录：$APP_DIR"
-  echo "本机访问： http://127.0.0.1:${port}/management.html"
+  if [[ "$local_only" == "y" ]]; then
+    echo "访问： http://127.0.0.1:${port}/management.html （仅本机）"
+  else
+    echo "访问： http://服务器IP:${port}/management.html （已对外监听，注意安全组/防火墙！）"
+  fi
   echo "查看日志： docker logs -f cliproxyapi"
 }
 
@@ -130,12 +160,9 @@ update_app() {
     exit 1
   fi
   cd "$APP_DIR"
-  echo "[1/3] 拉取最新镜像：$IMAGE"
   docker compose pull
-  echo "[2/3] 重建并重启"
   docker compose up -d --force-recreate
-  echo "[3/3] 完成"
-  echo "当前容器："
+  echo "✅ 更新完成"
   docker ps --filter "name=cliproxyapi"
 }
 
@@ -144,13 +171,9 @@ uninstall_app() {
   echo "=== 卸载 CLIProxyAPI（Docker）==="
   if [[ -d "$APP_DIR" && -f "${APP_DIR}/docker-compose.yml" ]]; then
     cd "$APP_DIR"
-    echo "[1/2] 停止并删除容器"
     docker compose down --remove-orphans || true
-  else
-    echo "[1/2] 未找到 docker-compose.yml，跳过 down"
   fi
 
-  echo "[2/2] 删除目录：$APP_DIR"
   read -r -p "是否删除数据目录（含 auths/logs/config）？(y/N)：" ans
   if [[ "${ans:-}" =~ ^[Yy]$ ]]; then
     rm -rf "$APP_DIR"
