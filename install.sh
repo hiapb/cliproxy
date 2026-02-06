@@ -1,19 +1,12 @@
 #!/usr/bin/env bash
-# 纯 Bash 实现，拒绝臃肿
 set -u
 
-# ==============================================================================
-# 全局配置
-# ==============================================================================
 APP_DIR="${HOME}/cliproxyapi"
 IMAGE="router-for-me/cliproxyapi:latest"
 CONFIG_URL="https://raw.githubusercontent.com/router-for-me/CLIProxyAPI/main/config.example.yaml"
 DEFAULT_PORT="8317"
 CONTAINER_NAME="cliproxyapi"
 
-# ==============================================================================
-# UI 颜色库
-# ==============================================================================
 RED='\033[31m'
 GREEN='\033[32m'
 YELLOW='\033[33m'
@@ -35,9 +28,6 @@ log_error() { echo -e "${RED}${icon_error} [ERROR] ${PLAIN}$1"; }
 log_warn() { echo -e "${YELLOW}${icon_warn} [WARN] ${PLAIN}$1"; }
 log_header() { echo -e "\n${BOLD}${CYAN}=== $1 ===${PLAIN}"; }
 
-# ==============================================================================
-# 基础检查 (移除 Python 检查)
-# ==============================================================================
 need_cmd() {
     command -v "$1" >/dev/null 2>&1 || { log_error "缺少必要命令：$1"; exit 1; }
 }
@@ -63,9 +53,6 @@ ensure_env() {
     fi
 }
 
-# ==============================================================================
-# 交互输入
-# ==============================================================================
 prompt_default() {
     local prompt="$1" def="$2" val
     echo -e -n "${CYAN}${prompt} ${PLAIN}(默认: ${GREEN}${def}${PLAIN}): "
@@ -99,9 +86,6 @@ prompt_yn_default_yes() {
 is_number() { [[ "${1:-}" =~ ^[0-9]+$ ]]; }
 ensure_dir() { mkdir -p "$APP_DIR"/{logs,auths}; }
 
-# ==============================================================================
-# 核心逻辑 (Pure Bash)
-# ==============================================================================
 write_compose() {
     local host_port="$1"
     local bind_local="$2"
@@ -128,41 +112,31 @@ ${ports_line}
 EOF
 }
 
-# 核心修改：使用 sed 代替 python 进行配置注入
 inject_required_config() {
     local secret="$1"
     local conf="${APP_DIR}/config.yaml"
 
-    # 使用 sed 转义符处理 secret 中的特殊字符 (如 / & 等)
-    # 这是一个 Bash技巧：将分隔符换成不可见字符或非常见字符 #
     local safe_secret=$(echo "$secret" | sed 's/#/\\#/g')
 
-    log_info "正在使用 sed 修改配置..."
 
-    # 1. 强制修改端口 (匹配 port: 任意数字)
     if grep -q "port:" "$conf"; then
         sed -i 's/^[[:space:]]*port: [0-9]*/  port: 8317/' "$conf"
     else
         echo -e "\nserver:\n  port: 8317" >> "$conf"
     fi
 
-    # 2. 强制修改 Auth 目录
     if grep -q "auth-dir:" "$conf"; then
          sed -i 's|^[[:space:]]*auth-dir: .*|auth-dir: /root/.cli-proxy-api|' "$conf"
     else
          echo "auth-dir: /root/.cli-proxy-api" >> "$conf"
     fi
 
-    # 3. 强制修改 Secret 和 allow-remote
-    # 这里假设 config.example.yaml 里已经有了 remote-management 块
     if grep -q "secret-key:" "$conf"; then
         sed -i "s|^[[:space:]]*secret-key: .*|  secret-key: \"$safe_secret\"|" "$conf"
     else
-        # 如果极其不幸没有这个块，追加它
         echo -e "remote-management:\n  allow-remote: false\n  secret-key: \"$secret\"" >> "$conf"
     fi
 
-    # 强制关闭 allow-remote
     sed -i "s|^[[:space:]]*allow-remote: .*|  allow-remote: false|" "$conf"
 }
 
