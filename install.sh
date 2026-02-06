@@ -225,10 +225,9 @@ get_status() {
 show_menu() {
     clear
     echo -e "================================================================"
-    echo -e "   ${BOLD}${CYAN}CLIProxyAPI${PLAIN} 管理脚本 (Pure Bash)"
+    echo -e "           ${BOLD}${CYAN}CLIProxyAPI${PLAIN} 管理脚本          "
     echo -e "================================================================"
-    echo -e " 状态: $(get_status)"
-    echo -e " 1. 安装 / 重置"
+    echo -e " 1. 安装"
     echo -e " 2. 更新"
     echo -e " 3. 卸载"
     echo -e " 0. 退出"
